@@ -1,4 +1,4 @@
-# Morning Download
+# 📰 Morning Download
 
 Daily news briefings covering world events, markets, and AI/agentic systems.
 
