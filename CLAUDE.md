@@ -20,11 +20,12 @@ The format has evolved; **match the most recent briefs** (`briefs/2026-05-*.md`)
 - Title: `# Morning Download — Month D, YYYY`, with `---` horizontal rules separating major blocks.
 - `## Section 1: World & Market Briefing` — each item is a bolded headline prefixed with a topical emoji (🇪🇺 🏛️ 📊 🏦 💼), followed by analysis. Include one item explicitly marked **Wildcard**.
 - `## Section 2: AI & Agentic Systems Briefing` — same emoji-headline format (🧠 🔮 🤖 🔌 📊 💡).
-- `## Sleeper Story` — one under-covered story with a "why it matters" argument.
-- `## One-Liner` — a single synthesizing sentence summarizing the day.
+- `## Closing` — bundles two bold inline items: `**Sleeper Story:**` (one under-covered story with a "why it matters" argument) and `**One-Liner:**` (a single synthesizing sentence summarizing the day).
 - `## Sources` — a bulleted list of `[Title — Publisher](url)` links backing the claims.
 
-Each headline's body is analysis-forward: state the fact, then explain the second-order implication (often addressed to enterprise/builder readers). Older briefs (`briefs/2026-04-*.md`) used plain bullet lists with inline `**Why it matters:**` tags and a combined `## Closing` section — do not copy that style for new entries.
+This `## Closing` block is the prevailing recent convention (e.g. `briefs/2026-05-22.md` through `briefs/2026-05-28.md`). One brief (`briefs/2026-05-29.md`) instead split Closing into standalone `## Sleeper Story` and `## One-Liner` headers — that's a one-off variation, not the norm; default to the `## Closing` form.
+
+Each headline's body is analysis-forward: state the fact, then explain the second-order implication (often addressed to enterprise/builder readers). Older briefs (`briefs/2026-04-*.md`) used plain bullet lists with inline `**Why it matters:**` tags rather than the emoji-prefixed headlines — do not copy that bullet style for new entries.
 
 ## Working conventions
 
