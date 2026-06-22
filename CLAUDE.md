@@ -10,8 +10,8 @@ Each briefing covers two beats: (1) world events / markets / M&A, and (2) AI and
 
 ## Layout
 
-- `briefs/YYYY-MM-DD.md` — one file per day (e.g. `briefs/2026-05-29.md`).
-- `briefs/YYYY-MM-DD-evening.md` — optional additional editions for a given day (suffix the edition name).
+- `briefs/YYYY-MM/YYYY-MM-DD.md` — one file per day, grouped into month subfolders (e.g. `briefs/2026-06/2026-06-15.md`).
+- `briefs/YYYY-MM/YYYY-MM-DD-evening.md` — optional additional editions for a given day (suffix the edition name).
 
 ## Briefing format
 
