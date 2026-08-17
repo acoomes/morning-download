@@ -1,0 +1,45 @@
+name: Publish site briefing feed
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "briefs/**"
+      - ".github/scripts/generate-site-feed.mjs"
+      - ".github/workflows/publish-site-feed.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-site-briefing-feed
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Generate the public briefing feed
+        run: node .github/scripts/generate-site-feed.mjs
+
+      - name: Commit the feed when it changed
+        run: |
+          if git diff --quiet -- site/briefs.json; then
+            echo "The published feed is already current."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add site/briefs.json
+          git commit -m "chore: refresh website briefing feed [skip ci]"
+          git push

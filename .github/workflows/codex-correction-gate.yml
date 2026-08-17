@@ -1,0 +1,223 @@
+name: Codex correction gate
+
+on:
+  pull_request:
+    types: [synchronize]
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  checks: read
+  statuses: read
+
+concurrency:
+  group: codex-correction-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  request-correction-review:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'synchronize' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask Codex to verify a corrective commit
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const trusted = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+            if (!trusted.has(pr.author_association)) {
+              core.info(`Ignoring untrusted PR association: ${pr.author_association}`);
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+            const pull_number = pr.number;
+            const codexLogin = "chatgpt-codex-connector[bot]";
+            const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, {
+              owner, repo, pull_number, per_page: 100,
+            });
+            const hasPriorCodexConcern = reviewComments.some((comment) =>
+              comment.user?.login === codexLogin && /P[01]\s+Badge|\[P[01]\]/i.test(comment.body || ""),
+            );
+            if (!hasPriorCodexConcern) {
+              core.info("No prior Codex P0/P1 feedback was found; no correction review is needed.");
+              return;
+            }
+
+            const marker = `<!-- codex-correction-review:${pr.head.sha} -->`;
+            const issueComments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: pull_number, per_page: 100,
+            });
+            if (issueComments.some((comment) => comment.body?.includes(marker))) {
+              core.info("A correction review was already requested for this commit.");
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: pull_number,
+              body: [
+                "@codex review",
+                "",
+                `Please verify that commit \`${pr.head.sha.slice(0, 10)}\` fully addresses the earlier Codex feedback and introduces no new P0/P1 concern.`,
+                "If a concern remains, leave actionable inline feedback. If the correction is effective, report a clean review for this exact commit.",
+                "",
+                marker,
+              ].join("\n"),
+            });
+
+  report-remaining-concerns:
+    if: >-
+      github.event_name == 'pull_request_review' &&
+      github.event.action == 'submitted' &&
+      github.event.review.user.login == 'chatgpt-codex-connector[bot]' &&
+      contains(github.event.review.body, 'Codex Review')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep the PR open and explain the next step
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prEvent = context.payload.pull_request;
+            const review = context.payload.review;
+            const reviewed = (review.body || "").match(/Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/i)?.[1];
+            if (!reviewed || !prEvent.head.sha.startsWith(reviewed)) {
+              core.info("The review does not target the current PR head; ignoring it.");
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+            const marker = `<!-- codex-correction-needs-work:${prEvent.head.sha} -->`;
+            const issueComments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: prEvent.number, per_page: 100,
+            });
+            const wasRequested = issueComments.some((comment) =>
+              comment.body?.includes(`<!-- codex-correction-review:${prEvent.head.sha} -->`),
+            );
+            if (!wasRequested || issueComments.some((comment) => comment.body?.includes(marker))) return;
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prEvent.number,
+              body: [
+                `Codex found an additional adjustment on \`${prEvent.head.sha.slice(0, 10)}\`, so this PR has not been merged.`,
+                "",
+                "Address the new inline feedback and push another commit. The next correction commit will be re-verified automatically.",
+                "",
+                marker,
+              ].join("\n"),
+            });
+
+  merge-clean-correction:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.action == 'created' &&
+      github.event.issue.pull_request != null &&
+      github.event.comment.user.login == 'chatgpt-codex-connector[bot]' &&
+      contains(github.event.comment.body, 'Didn''t find any major issues')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify the clean review and merge its exact commit
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pull_number = context.payload.issue.number;
+            const cleanReview = context.payload.comment.body || "";
+            const reviewed = cleanReview.match(/Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/i)?.[1];
+            if (!reviewed) {
+              core.setFailed("The clean Codex response did not identify a reviewed commit.");
+              return;
+            }
+
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+            const trusted = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+            if (
+              pr.state !== "open" ||
+              pr.draft ||
+              pr.head.repo.full_name !== `${owner}/${repo}` ||
+              !trusted.has(pr.author_association)
+            ) {
+              core.setFailed("This PR is not an open, trusted, same-repository correction PR.");
+              return;
+            }
+            if (!pr.head.sha.startsWith(reviewed)) {
+              core.setFailed(`Codex reviewed ${reviewed}, but the current head is ${pr.head.sha}.`);
+              return;
+            }
+
+            const issueComments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: pull_number, per_page: 100,
+            });
+            const requestedMarker = `<!-- codex-correction-review:${pr.head.sha} -->`;
+            if (!issueComments.some((comment) => comment.body?.includes(requestedMarker))) {
+              core.setFailed("The clean review was not produced by this correction gate.");
+              return;
+            }
+
+            const acceptableChecks = new Set(["success", "neutral", "skipped"]);
+            for (let attempt = 0; attempt < 20; attempt += 1) {
+              const checks = await github.paginate(github.rest.checks.listForRef, {
+                owner, repo, ref: pr.head.sha, per_page: 100, filter: "latest",
+              });
+              const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+                owner, repo, ref: pr.head.sha, per_page: 100,
+              });
+              const failedCheck = checks.find((check) =>
+                check.status === "completed" && !acceptableChecks.has(check.conclusion),
+              );
+              const failedStatus = statuses.find((status) => ["error", "failure"].includes(status.state));
+              if (failedCheck || failedStatus) {
+                const name = failedCheck?.name || failedStatus?.context || "an external check";
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: pull_number,
+                  body: `Codex cleared \`${pr.head.sha.slice(0, 10)}\`, but **${name}** failed. Merge is paused until that check is corrected and a new commit is reviewed.`,
+                });
+                core.setFailed(`${name} failed.`);
+                return;
+              }
+
+              const pending = checks.some((check) => check.status !== "completed") ||
+                statuses.some((status) => status.state === "pending");
+              if (!pending) break;
+              if (attempt === 19) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: pull_number,
+                  body: `Codex cleared \`${pr.head.sha.slice(0, 10)}\`, but another check is still pending. Merge remains paused.`,
+                });
+                core.setFailed("A required check remained pending.");
+                return;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 30000));
+            }
+
+            const result = await github.rest.pulls.merge({
+              owner,
+              repo,
+              pull_number,
+              sha: pr.head.sha,
+              merge_method: "squash",
+              commit_title: `${pr.title} (#${pull_number})`,
+            });
+            if (!result.data.merged) {
+              core.setFailed(result.data.message || "GitHub declined the merge.");
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: pull_number,
+              body: `Codex verified \`${pr.head.sha.slice(0, 10)}\` as clean and all checks passed. The correction PR has been squash-merged automatically.`,
+            });
