@@ -33,7 +33,7 @@ jobs:
 
       - name: Commit the feed when it changed
         run: |
-          if git diff --quiet -- site/briefs.json; then
+          if git ls-files --error-unmatch site/briefs.json >/dev/null 2>&1 && git diff --quiet -- site/briefs.json; then
             echo "The published feed is already current."
             exit 0
           fi
