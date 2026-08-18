@@ -2,7 +2,7 @@ name: Codex follow-up review
 
 on:
   pull_request:
-    types: [synchronize]
+    types: [opened, reopened, ready_for_review, synchronize]
 
 concurrency:
   group: codex-follow-up-${{ github.event.pull_request.number }}
@@ -22,7 +22,12 @@ jobs:
     outputs:
       result: ${{ steps.codex.outputs.final-message }}
     steps:
+      - name: Defer the opening review to the native Codex integration
+        if: github.event.action != 'synchronize'
+        run: echo "The native Codex integration handles the initial pull request review."
+
       - name: Check out the exact pull request head
+        if: github.event.action == 'synchronize'
         uses: actions/checkout@v5
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -30,6 +35,7 @@ jobs:
           persist-credentials: false
 
       - name: Prepare trusted review context
+        if: github.event.action == 'synchronize'
         uses: actions/github-script@v7
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -93,6 +99,7 @@ jobs:
             );
 
       - name: Review the updated pull request with Codex
+        if: github.event.action == 'synchronize'
         id: codex
         uses: openai/codex-action@v1
         with:
@@ -104,6 +111,7 @@ jobs:
 
   finalize:
     needs: review
+    if: github.event.action == 'synchronize' && needs.review.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -231,11 +239,27 @@ jobs:
               });
             }
 
+            const { data: baseBranch } = await github.rest.repos.getBranch({
+              owner,
+              repo,
+              branch: pr.base.ref,
+            });
+            const requiredStatusChecks = baseBranch.protection?.required_status_checks;
+            const configuredChecks = requiredStatusChecks?.checks || [];
+            const configuredContexts = requiredStatusChecks?.contexts || [];
+            const requiredCheckSpecs = configuredChecks.length > 0
+              ? configuredChecks.map(({ context, app_id }) => ({ context, app_id }))
+              : configuredContexts.map((context) => ({ context, app_id: null }));
+
+            if (!baseBranch.protected || requiredCheckSpecs.length === 0) {
+              core.setFailed(
+                `Base branch ${pr.base.ref} does not define required status checks; refusing to merge.`,
+              );
+              return;
+            }
+
             const acceptable = new Set(["success", "neutral", "skipped"]);
-            const requiredCheckNames = new Set(["review"]);
-            const quietObservationsRequired = 3;
-            let quietObservations = 0;
-            for (let attempt = 0; attempt < 24; attempt += 1) {
+            for (let attempt = 0; attempt < 20; attempt += 1) {
               const checks = await github.paginate(github.rest.checks.listForRef, {
                 owner,
                 repo,
@@ -258,61 +282,53 @@ jobs:
                 }
               }
               const latestStatuses = [...latestStatusesByContext.values()];
-              const currentRunPath = `/actions/runs/${context.runId}/`;
-              const requiredChecks = [...requiredCheckNames].map((name) => ({
-                name,
+              const requiredChecks = requiredCheckSpecs.map((required) => ({
+                ...required,
                 check: checks.find(
                   (candidate) =>
-                    candidate.name === name &&
-                    candidate.details_url?.includes(currentRunPath),
+                    candidate.name === required.context &&
+                    (required.app_id == null || candidate.app?.id === required.app_id),
                 ),
+                status: required.app_id == null
+                  ? latestStatuses.find(
+                      (candidate) => candidate.context === required.context,
+                    )
+                  : undefined,
               }));
-              const missingRequired = requiredChecks.find(({ check }) => !check);
-              const observedChecks = checks.filter(
-                (check) => !check.details_url?.includes(currentRunPath),
+              const failedRequired = requiredChecks.find(
+                ({ check, status }) =>
+                  (check?.status === "completed" &&
+                    !acceptable.has(check.conclusion)) ||
+                  ["error", "failure"].includes(status?.state),
               );
-              const checksToEvaluate = [
-                ...requiredChecks.map(({ check }) => check).filter(Boolean),
-                ...observedChecks,
-              ];
-              const failedCheck = checksToEvaluate.find(
-                (check) => check.status === "completed" && !acceptable.has(check.conclusion),
-              );
-              const failedStatus = latestStatuses.find((status) =>
-                ["error", "failure"].includes(status.state),
-              );
-              if (failedCheck || failedStatus) {
-                const name = failedCheck?.name || failedStatus?.context || "another check";
+              if (failedRequired) {
+                const name = failedRequired.context;
                 await github.rest.issues.createComment({
                   owner,
                   repo,
                   issue_number: pull_number,
-                  body: `Codex cleared \`${reviewedHead.slice(0, 10)}\`, but **${name}** failed. The pull request remains open.`,
+                  body: `Codex cleared \`${reviewedHead.slice(0, 10)}\`, but required check **${name}** failed. The pull request remains open.`,
                 });
                 core.setFailed(`${name} failed.`);
                 return;
               }
 
-              const pending = Boolean(missingRequired) ||
-                checksToEvaluate.some((check) => check.status !== "completed") ||
-                latestStatuses.some((status) => status.state === "pending");
-              if (pending) {
-                quietObservations = 0;
-              } else {
-                quietObservations += 1;
-                if (quietObservations >= quietObservationsRequired) break;
-              }
-              if (attempt === 23) {
-                const detail = missingRequired
-                  ? `required check **${missingRequired.name}** never appeared`
-                  : "another check is still pending";
+              const pendingRequired = requiredChecks.find(
+                ({ check, status }) =>
+                  (!check && !status) ||
+                  (check && check.status !== "completed") ||
+                  status?.state === "pending",
+              );
+              if (!pendingRequired) break;
+              if (attempt === 19) {
+                const name = pendingRequired.context;
                 await github.rest.issues.createComment({
                   owner,
                   repo,
                   issue_number: pull_number,
-                  body: `Codex cleared \`${reviewedHead.slice(0, 10)}\`, but ${detail}. The pull request remains open.`,
+                  body: `Codex cleared \`${reviewedHead.slice(0, 10)}\`, but required check **${name}** never completed successfully. The pull request remains open.`,
                 });
-                core.setFailed(detail);
+                core.setFailed(`Required check ${name} did not complete successfully.`);
                 return;
               }
               await new Promise((resolve) => setTimeout(resolve, 15000));
