@@ -24,3 +24,7 @@ Briefings are organized by month under `briefs/YYYY-MM/`. Each file is a standal
 2. **AI & Agentic Systems Briefing** — frontier models, infrastructure, enterprise AI
 
 Some days include additional editions (e.g., `2026-04-06-evening.md`).
+
+## Pull request review automation
+
+Codex reviews new pull requests through the repository's native Codex integration. When a trusted contributor pushes another commit to the same pull request, the `Codex follow-up review` workflow re-checks the complete current diff and all earlier Codex P0/P1 feedback. It leaves an actionable review when another correction is needed. A clean, unchanged head is squash-merged automatically only after every status check required by `main` branch protection exists and passes; the workflow fails closed when branch protection has no required checks.
