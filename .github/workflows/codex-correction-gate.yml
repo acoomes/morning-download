@@ -98,7 +98,7 @@ jobs:
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           prompt-file: .github/codex/follow-up-review.md
-          codex-args: '["--ephemeral","--search","--output-schema",".github/codex/review-schema.json"]'
+          codex-args: '["--ephemeral","--config","web_search=\"live\"","--output-schema",".github/codex/review-schema.json"]'
           sandbox: workspace-write
           safety-strategy: drop-sudo
 
