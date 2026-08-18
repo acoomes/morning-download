@@ -232,7 +232,10 @@ jobs:
             }
 
             const acceptable = new Set(["success", "neutral", "skipped"]);
-            for (let attempt = 0; attempt < 20; attempt += 1) {
+            const requiredCheckNames = new Set(["review"]);
+            const quietObservationsRequired = 3;
+            let quietObservations = 0;
+            for (let attempt = 0; attempt < 24; attempt += 1) {
               const checks = await github.paginate(github.rest.checks.listForRef, {
                 owner,
                 repo,
@@ -244,13 +247,38 @@ jobs:
                 github.rest.repos.listCommitStatusesForRef,
                 { owner, repo, ref: reviewedHead, per_page: 100 },
               );
-              const otherChecks = checks.filter(
-                (check) => !check.details_url?.includes(`/actions/runs/${context.runId}/`),
+              const latestStatusesByContext = new Map();
+              for (const status of statuses) {
+                const current = latestStatusesByContext.get(status.context);
+                if (
+                  !current ||
+                  Date.parse(status.created_at) > Date.parse(current.created_at)
+                ) {
+                  latestStatusesByContext.set(status.context, status);
+                }
+              }
+              const latestStatuses = [...latestStatusesByContext.values()];
+              const currentRunPath = `/actions/runs/${context.runId}/`;
+              const requiredChecks = [...requiredCheckNames].map((name) => ({
+                name,
+                check: checks.find(
+                  (candidate) =>
+                    candidate.name === name &&
+                    candidate.details_url?.includes(currentRunPath),
+                ),
+              }));
+              const missingRequired = requiredChecks.find(({ check }) => !check);
+              const observedChecks = checks.filter(
+                (check) => !check.details_url?.includes(currentRunPath),
               );
-              const failedCheck = otherChecks.find(
+              const checksToEvaluate = [
+                ...requiredChecks.map(({ check }) => check).filter(Boolean),
+                ...observedChecks,
+              ];
+              const failedCheck = checksToEvaluate.find(
                 (check) => check.status === "completed" && !acceptable.has(check.conclusion),
               );
-              const failedStatus = statuses.find((status) =>
+              const failedStatus = latestStatuses.find((status) =>
                 ["error", "failure"].includes(status.state),
               );
               if (failedCheck || failedStatus) {
@@ -265,17 +293,26 @@ jobs:
                 return;
               }
 
-              const pending = otherChecks.some((check) => check.status !== "completed") ||
-                statuses.some((status) => status.state === "pending");
-              if (!pending) break;
-              if (attempt === 19) {
+              const pending = Boolean(missingRequired) ||
+                checksToEvaluate.some((check) => check.status !== "completed") ||
+                latestStatuses.some((status) => status.state === "pending");
+              if (pending) {
+                quietObservations = 0;
+              } else {
+                quietObservations += 1;
+                if (quietObservations >= quietObservationsRequired) break;
+              }
+              if (attempt === 23) {
+                const detail = missingRequired
+                  ? `required check **${missingRequired.name}** never appeared`
+                  : "another check is still pending";
                 await github.rest.issues.createComment({
                   owner,
                   repo,
                   issue_number: pull_number,
-                  body: `Codex cleared \`${reviewedHead.slice(0, 10)}\`, but another check is still pending. The pull request remains open.`,
+                  body: `Codex cleared \`${reviewedHead.slice(0, 10)}\`, but ${detail}. The pull request remains open.`,
                 });
-                core.setFailed("Another check remained pending.");
+                core.setFailed(detail);
                 return;
               }
               await new Promise((resolve) => setTimeout(resolve, 15000));

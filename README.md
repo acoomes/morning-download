@@ -27,4 +27,4 @@ Some days include additional editions (e.g., `2026-04-06-evening.md`).
 
 ## Pull request review automation
 
-Codex reviews new pull requests through the repository's Codex integration. When a trusted contributor pushes another commit to the same pull request, the `Codex follow-up review` workflow re-checks the complete current diff and all earlier Codex P0/P1 feedback. It leaves an actionable review when another correction is needed; a clean, unchanged head is squash-merged automatically after the other checks pass.
+Codex reviews new pull requests through the repository's Codex integration. When a trusted contributor pushes another commit to the same pull request, the `Codex follow-up review` workflow re-checks the complete current diff and all earlier Codex P0/P1 feedback. It leaves an actionable review when another correction is needed; a clean, unchanged head is squash-merged automatically only after the required `review` check succeeds and three consecutive polling windows find no pending or failed checks.
