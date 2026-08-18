@@ -1,223 +1,313 @@
-name: Codex correction gate
+name: Codex follow-up review
 
 on:
   pull_request:
     types: [synchronize]
-  pull_request_review:
-    types: [submitted]
-  issue_comment:
-    types: [created]
-
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-  checks: read
-  statuses: read
 
 concurrency:
-  group: codex-correction-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: false
+  group: codex-follow-up-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
-  request-correction-review:
+  review:
     if: >-
-      github.event_name == 'pull_request' &&
-      github.event.action == 'synchronize' &&
       github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      result: ${{ steps.codex.outputs.final-message }}
     steps:
-      - name: Ask Codex to verify a corrective commit
+      - name: Check out the exact pull request head
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare trusted review context
         uses: actions/github-script@v7
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         with:
           script: |
-            const pr = context.payload.pull_request;
-            const trusted = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
-            if (!trusted.has(pr.author_association)) {
-              core.info(`Ignoring untrusted PR association: ${pr.author_association}`);
-              return;
-            }
-
+            const fs = require("fs");
             const { owner, repo } = context.repo;
-            const pull_number = pr.number;
-            const codexLogin = "chatgpt-codex-connector[bot]";
-            const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, {
-              owner, repo, pull_number, per_page: 100,
-            });
-            const hasPriorCodexConcern = reviewComments.some((comment) =>
-              comment.user?.login === codexLogin && /P[01]\s+Badge|\[P[01]\]/i.test(comment.body || ""),
+            const pull_number = context.payload.pull_request.number;
+            const codexLogins = new Set([
+              "chatgpt-codex-connector[bot]",
+              "github-actions[bot]",
+            ]);
+
+            const inlineComments = await github.paginate(
+              github.rest.pulls.listReviewComments,
+              { owner, repo, pull_number, per_page: 100 },
             );
-            if (!hasPriorCodexConcern) {
-              core.info("No prior Codex P0/P1 feedback was found; no correction review is needed.");
-              return;
-            }
-
-            const marker = `<!-- codex-correction-review:${pr.head.sha} -->`;
-            const issueComments = await github.paginate(github.rest.issues.listComments, {
-              owner, repo, issue_number: pull_number, per_page: 100,
-            });
-            if (issueComments.some((comment) => comment.body?.includes(marker))) {
-              core.info("A correction review was already requested for this commit.");
-              return;
-            }
-
-            await github.rest.issues.createComment({
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
               owner,
               repo,
-              issue_number: pull_number,
-              body: [
-                "@codex review",
-                "",
-                `Please verify that commit \`${pr.head.sha.slice(0, 10)}\` fully addresses the earlier Codex feedback and introduces no new P0/P1 concern.`,
-                "If a concern remains, leave actionable inline feedback. If the correction is effective, report a clean review for this exact commit.",
-                "",
-                marker,
-              ].join("\n"),
+              pull_number,
+              per_page: 100,
             });
 
-  report-remaining-concerns:
-    if: >-
-      github.event_name == 'pull_request_review' &&
-      github.event.action == 'submitted' &&
-      github.event.review.user.login == 'chatgpt-codex-connector[bot]' &&
-      contains(github.event.review.body, 'Codex Review')
+            const previousFindings = inlineComments
+              .filter((comment) =>
+                codexLogins.has(comment.user?.login) &&
+                /P[01]\s+Badge|\[P[01]\]/i.test(comment.body || ""),
+              )
+              .map((comment) => ({
+                kind: "inline",
+                path: comment.path || "",
+                body: (comment.body || "").slice(0, 4000),
+              }));
+
+            const previousFollowUps = reviews
+              .filter((review) =>
+                codexLogins.has(review.user?.login) &&
+                /Codex follow-up review/i.test(review.body || ""),
+              )
+              .map((review) => ({
+                kind: "review",
+                body: (review.body || "").slice(0, 8000),
+              }));
+
+            const reviewContext = {
+              repository: `${owner}/${repo}`,
+              pull_number,
+              base_sha: process.env.BASE_SHA,
+              head_sha: process.env.HEAD_SHA,
+              previous_codex_feedback: [
+                ...previousFindings,
+                ...previousFollowUps,
+              ].slice(-40),
+            };
+
+            fs.writeFileSync(
+              ".codex-follow-up-context.json",
+              JSON.stringify(reviewContext, null, 2),
+            );
+
+      - name: Review the updated pull request with Codex
+        id: codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/follow-up-review.md
+          codex-args: '["--ephemeral","--search","--output-schema",".github/codex/review-schema.json"]'
+          sandbox: workspace-write
+          safety-strategy: drop-sudo
+
+  finalize:
+    needs: review
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      checks: read
+      contents: write
+      issues: write
+      pull-requests: write
+      statuses: read
     steps:
-      - name: Keep the PR open and explain the next step
+      - name: Post the exact-head review and merge only a clean result
         uses: actions/github-script@v7
+        env:
+          CODEX_RESULT: ${{ needs.review.outputs.result }}
+          REVIEWED_HEAD: ${{ github.event.pull_request.head.sha }}
         with:
           script: |
-            const prEvent = context.payload.pull_request;
-            const review = context.payload.review;
-            const reviewed = (review.body || "").match(/Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/i)?.[1];
-            if (!reviewed || !prEvent.head.sha.startsWith(reviewed)) {
-              core.info("The review does not target the current PR head; ignoring it.");
+            const { owner, repo } = context.repo;
+            const pull_number = context.payload.pull_request.number;
+            const reviewedHead = process.env.REVIEWED_HEAD;
+            const marker = `<!-- codex-follow-up:${reviewedHead} -->`;
+
+            let result;
+            try {
+              result = JSON.parse(process.env.CODEX_RESULT || "");
+            } catch (error) {
+              core.setFailed(`Codex returned invalid structured output: ${error.message}`);
               return;
             }
 
-            const { owner, repo } = context.repo;
-            const marker = `<!-- codex-correction-needs-work:${prEvent.head.sha} -->`;
-            const issueComments = await github.paginate(github.rest.issues.listComments, {
-              owner, repo, issue_number: prEvent.number, per_page: 100,
-            });
-            const wasRequested = issueComments.some((comment) =>
-              comment.body?.includes(`<!-- codex-correction-review:${prEvent.head.sha} -->`),
-            );
-            if (!wasRequested || issueComments.some((comment) => comment.body?.includes(marker))) return;
+            if (
+              result.reviewed_commit !== reviewedHead ||
+              !["clean", "needs_changes"].includes(result.verdict) ||
+              !Array.isArray(result.findings)
+            ) {
+              core.setFailed("Codex output did not match the exact pull request head and review contract.");
+              return;
+            }
+            if (result.verdict === "clean" && result.findings.length !== 0) {
+              core.setFailed("Codex marked the commit clean but also returned findings.");
+              return;
+            }
+            if (result.verdict === "needs_changes" && result.findings.length === 0) {
+              core.setFailed("Codex requested changes without an actionable finding.");
+              return;
+            }
 
-            await github.rest.issues.createComment({
+            const { data: pr } = await github.rest.pulls.get({
               owner,
               repo,
-              issue_number: prEvent.number,
-              body: [
-                `Codex found an additional adjustment on \`${prEvent.head.sha.slice(0, 10)}\`, so this PR has not been merged.`,
-                "",
-                "Address the new inline feedback and push another commit. The next correction commit will be re-verified automatically.",
-                "",
-                marker,
-              ].join("\n"),
+              pull_number,
             });
-
-  merge-clean-correction:
-    if: >-
-      github.event_name == 'issue_comment' &&
-      github.event.action == 'created' &&
-      github.event.issue.pull_request != null &&
-      github.event.comment.user.login == 'chatgpt-codex-connector[bot]' &&
-      contains(github.event.comment.body, 'Didn''t find any major issues')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify the clean review and merge its exact commit
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { owner, repo } = context.repo;
-            const pull_number = context.payload.issue.number;
-            const cleanReview = context.payload.comment.body || "";
-            const reviewed = cleanReview.match(/Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/i)?.[1];
-            if (!reviewed) {
-              core.setFailed("The clean Codex response did not identify a reviewed commit.");
-              return;
-            }
-
-            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
             const trusted = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
             if (
               pr.state !== "open" ||
               pr.draft ||
+              pr.head.sha !== reviewedHead ||
               pr.head.repo.full_name !== `${owner}/${repo}` ||
               !trusted.has(pr.author_association)
             ) {
-              core.setFailed("This PR is not an open, trusted, same-repository correction PR.");
-              return;
-            }
-            if (!pr.head.sha.startsWith(reviewed)) {
-              core.setFailed(`Codex reviewed ${reviewed}, but the current head is ${pr.head.sha}.`);
+              core.setFailed("The pull request changed or is no longer eligible after Codex reviewed it.");
               return;
             }
 
-            const issueComments = await github.paginate(github.rest.issues.listComments, {
-              owner, repo, issue_number: pull_number, per_page: 100,
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner,
+              repo,
+              pull_number,
+              per_page: 100,
             });
-            const requestedMarker = `<!-- codex-correction-review:${pr.head.sha} -->`;
-            if (!issueComments.some((comment) => comment.body?.includes(requestedMarker))) {
-              core.setFailed("The clean review was not produced by this correction gate.");
+            const alreadyReviewed = reviews.some((review) =>
+              (review.body || "").includes(marker),
+            );
+
+            if (result.verdict === "needs_changes") {
+              if (alreadyReviewed) {
+                core.setFailed("This exact commit already has a blocking follow-up review.");
+                return;
+              }
+              const findings = result.findings.map((finding) => {
+                const location = finding.location ? ` — ${finding.location}` : "";
+                return `- **[${finding.priority}] ${finding.title}**${location}\n  ${finding.details}`;
+              });
+              await github.rest.pulls.createReview({
+                owner,
+                repo,
+                pull_number,
+                commit_id: reviewedHead,
+                event: "COMMENT",
+                body: [
+                  "### Codex follow-up review — changes needed",
+                  "",
+                  `**Reviewed commit:** \`${reviewedHead.slice(0, 10)}\``,
+                  "",
+                  result.summary,
+                  "",
+                  ...findings,
+                  "",
+                  "Push another correction commit after addressing these items. Codex will review the new head automatically.",
+                  "",
+                  marker,
+                ].join("\n"),
+              });
+              core.setFailed(`Codex found ${result.findings.length} blocking concern(s).`);
               return;
             }
 
-            const acceptableChecks = new Set(["success", "neutral", "skipped"]);
+            if (!alreadyReviewed) {
+              await github.rest.pulls.createReview({
+                owner,
+                repo,
+                pull_number,
+                commit_id: reviewedHead,
+                event: "COMMENT",
+                body: [
+                  "### Codex follow-up review — clean",
+                  "",
+                  `**Reviewed commit:** \`${reviewedHead.slice(0, 10)}\``,
+                  "",
+                  result.summary,
+                  "",
+                  "No P0/P1 concerns remain for this pull request head. The automatic merge gate is checking the remaining CI results.",
+                  "",
+                  marker,
+                ].join("\n"),
+              });
+            }
+
+            const acceptable = new Set(["success", "neutral", "skipped"]);
             for (let attempt = 0; attempt < 20; attempt += 1) {
               const checks = await github.paginate(github.rest.checks.listForRef, {
-                owner, repo, ref: pr.head.sha, per_page: 100, filter: "latest",
+                owner,
+                repo,
+                ref: reviewedHead,
+                per_page: 100,
+                filter: "latest",
               });
-              const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
-                owner, repo, ref: pr.head.sha, per_page: 100,
-              });
-              const failedCheck = checks.find((check) =>
-                check.status === "completed" && !acceptableChecks.has(check.conclusion),
+              const statuses = await github.paginate(
+                github.rest.repos.listCommitStatusesForRef,
+                { owner, repo, ref: reviewedHead, per_page: 100 },
               );
-              const failedStatus = statuses.find((status) => ["error", "failure"].includes(status.state));
+              const otherChecks = checks.filter(
+                (check) => !check.details_url?.includes(`/actions/runs/${context.runId}/`),
+              );
+              const failedCheck = otherChecks.find(
+                (check) => check.status === "completed" && !acceptable.has(check.conclusion),
+              );
+              const failedStatus = statuses.find((status) =>
+                ["error", "failure"].includes(status.state),
+              );
               if (failedCheck || failedStatus) {
-                const name = failedCheck?.name || failedStatus?.context || "an external check";
+                const name = failedCheck?.name || failedStatus?.context || "another check";
                 await github.rest.issues.createComment({
-                  owner, repo, issue_number: pull_number,
-                  body: `Codex cleared \`${pr.head.sha.slice(0, 10)}\`, but **${name}** failed. Merge is paused until that check is corrected and a new commit is reviewed.`,
+                  owner,
+                  repo,
+                  issue_number: pull_number,
+                  body: `Codex cleared \`${reviewedHead.slice(0, 10)}\`, but **${name}** failed. The pull request remains open.`,
                 });
                 core.setFailed(`${name} failed.`);
                 return;
               }
 
-              const pending = checks.some((check) => check.status !== "completed") ||
+              const pending = otherChecks.some((check) => check.status !== "completed") ||
                 statuses.some((status) => status.state === "pending");
               if (!pending) break;
               if (attempt === 19) {
                 await github.rest.issues.createComment({
-                  owner, repo, issue_number: pull_number,
-                  body: `Codex cleared \`${pr.head.sha.slice(0, 10)}\`, but another check is still pending. Merge remains paused.`,
+                  owner,
+                  repo,
+                  issue_number: pull_number,
+                  body: `Codex cleared \`${reviewedHead.slice(0, 10)}\`, but another check is still pending. The pull request remains open.`,
                 });
-                core.setFailed("A required check remained pending.");
+                core.setFailed("Another check remained pending.");
                 return;
               }
-              await new Promise((resolve) => setTimeout(resolve, 30000));
+              await new Promise((resolve) => setTimeout(resolve, 15000));
             }
 
-            const result = await github.rest.pulls.merge({
+            const { data: current } = await github.rest.pulls.get({
               owner,
               repo,
               pull_number,
-              sha: pr.head.sha,
-              merge_method: "squash",
-              commit_title: `${pr.title} (#${pull_number})`,
             });
-            if (!result.data.merged) {
-              core.setFailed(result.data.message || "GitHub declined the merge.");
+            if (current.state !== "open" || current.head.sha !== reviewedHead) {
+              core.setFailed("The pull request changed before the merge could be completed.");
               return;
             }
 
-            await github.rest.issues.createComment({
+            const merge = await github.rest.pulls.merge({
               owner,
               repo,
-              issue_number: pull_number,
-              body: `Codex verified \`${pr.head.sha.slice(0, 10)}\` as clean and all checks passed. The correction PR has been squash-merged automatically.`,
+              pull_number,
+              sha: reviewedHead,
+              merge_method: "squash",
+              commit_title: `${current.title} (#${pull_number})`,
             });
+            if (!merge.data.merged) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: pull_number,
+                body: `Codex cleared \`${reviewedHead.slice(0, 10)}\`, but GitHub declined the automatic merge: ${merge.data.message || "unknown reason"}`,
+              });
+              core.setFailed(merge.data.message || "GitHub declined the automatic merge.");
+              return;
+            }
+
+            core.info(`Squash-merged pull request #${pull_number} at ${reviewedHead}.`);
