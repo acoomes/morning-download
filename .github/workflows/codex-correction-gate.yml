@@ -115,6 +115,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      actions: write
       checks: read
       contents: write
       issues: write
@@ -362,5 +363,12 @@ jobs:
               core.setFailed(merge.data.message || "GitHub declined the automatic merge.");
               return;
             }
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner,
+              repo,
+              workflow_id: "publish-site-feed.yml",
+              ref: "main",
+            });
 
             core.info(`Squash-merged pull request #${pull_number} at ${reviewedHead}.`);
