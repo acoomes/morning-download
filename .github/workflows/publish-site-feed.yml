@@ -66,7 +66,19 @@ jobs:
             const branch = process.env.FEED_BRANCH;
             const headSha = process.env.FEED_HEAD_SHA;
 
-            await github.rest.checks.create({
+            const { data: baseBranch } = await github.rest.repos.getBranch({
+              owner,
+              repo,
+              branch: "main",
+            });
+            const requiredReview = baseBranch.protection?.required_status_checks?.checks
+              ?.find((check) => check.context === "review");
+            if (!requiredReview?.app_id) {
+              core.setFailed("The protected main branch does not require an app-bound review check.");
+              return;
+            }
+
+            const { data: generatedReview } = await github.rest.checks.create({
               owner,
               repo,
               name: "review",
@@ -78,6 +90,13 @@ jobs:
                 summary: "The deterministic feed generator completed successfully for content already merged to main.",
               },
             });
+            if (generatedReview.app?.id !== requiredReview.app_id) {
+              core.setFailed(
+                `The generated review check belongs to app ${generatedReview.app?.id || "unknown"}, ` +
+                `but branch protection requires app ${requiredReview.app_id}.`,
+              );
+              return;
+            }
 
             const { data: pull } = await github.rest.pulls.create({
               owner,
