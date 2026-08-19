@@ -71,10 +71,16 @@ jobs:
               repo,
               branch: "main",
             });
+            // The repository's required `review` check is app-bound to
+            // GitHub Actions (app 15368). A runtime comparison below keeps
+            // this deterministic publisher fail-closed if that rule changes.
+            const githubActionsAppId = 15368;
             const requiredReview = baseBranch.protection?.required_status_checks?.checks
               ?.find((check) => check.context === "review");
-            if (!requiredReview?.app_id) {
-              core.setFailed("The protected main branch does not require an app-bound review check.");
+            if (requiredReview?.app_id !== githubActionsAppId) {
+              core.setFailed(
+                "The protected main branch is not using the expected GitHub Actions review check.",
+              );
               return;
             }
 
@@ -90,10 +96,12 @@ jobs:
                 summary: "The deterministic feed generator completed successfully for content already merged to main.",
               },
             });
-            if (generatedReview.app?.id !== requiredReview.app_id) {
+            if (
+              generatedReview.app?.id !== githubActionsAppId ||
+              generatedReview.app?.slug !== "github-actions"
+            ) {
               core.setFailed(
-                `The generated review check belongs to app ${generatedReview.app?.id || "unknown"}, ` +
-                `but branch protection requires app ${requiredReview.app_id}.`,
+                "The generated review check was not created by the GitHub Actions App.",
               );
               return;
             }
