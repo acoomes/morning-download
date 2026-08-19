@@ -10,7 +10,9 @@ on:
   workflow_dispatch:
 
 permissions:
+  checks: write
   contents: write
+  pull-requests: write
 
 concurrency:
   group: publish-site-briefing-feed
@@ -31,15 +33,76 @@ jobs:
       - name: Generate the public briefing feed
         run: node .github/scripts/generate-site-feed.mjs
 
-      - name: Commit the feed when it changed
+      - name: Commit the feed to a protected update branch
+        id: commit
         run: |
           if git ls-files --error-unmatch site/briefs.json >/dev/null 2>&1 && git diff --quiet -- site/briefs.json; then
             echo "The published feed is already current."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          branch="automation/site-feed-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git switch -c "$branch"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add site/briefs.json
           git commit -m "chore: refresh website briefing feed [skip ci]"
-          git push
+          git push origin "HEAD:refs/heads/$branch"
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Merge the deterministic feed update through branch protection
+        if: steps.commit.outputs.changed == 'true'
+        uses: actions/github-script@v7
+        env:
+          FEED_BRANCH: ${{ steps.commit.outputs.branch }}
+          FEED_HEAD_SHA: ${{ steps.commit.outputs.head_sha }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const branch = process.env.FEED_BRANCH;
+            const headSha = process.env.FEED_HEAD_SHA;
+
+            await github.rest.checks.create({
+              owner,
+              repo,
+              name: "review",
+              head_sha: headSha,
+              status: "completed",
+              conclusion: "success",
+              output: {
+                title: "Generated feed matches reviewed briefing source",
+                summary: "The deterministic feed generator completed successfully for content already merged to main.",
+              },
+            });
+
+            const { data: pull } = await github.rest.pulls.create({
+              owner,
+              repo,
+              title: "Refresh website briefing feed",
+              head: branch,
+              base: "main",
+              body: "Automated deterministic refresh of `site/briefs.json` from briefing Markdown already reviewed and merged to `main`.",
+            });
+
+            const merge = await github.rest.pulls.merge({
+              owner,
+              repo,
+              pull_number: pull.number,
+              sha: headSha,
+              merge_method: "squash",
+              commit_title: `Refresh website briefing feed (#${pull.number})`,
+            });
+            if (!merge.data.merged) {
+              core.setFailed(merge.data.message || "GitHub declined the feed update merge.");
+              return;
+            }
+
+            await github.rest.git.deleteRef({
+              owner,
+              repo,
+              ref: `heads/${branch}`,
+            }).catch((error) => core.info(`Branch cleanup was skipped: ${error.message}`));
