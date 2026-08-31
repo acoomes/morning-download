@@ -38,7 +38,10 @@ function parseClosing(markdown) {
   const oneLiner = closing.match(/\*\*One-Liner:\*\*\s*([\s\S]*?)$/);
   return {
     sleeper: sleeper?.[1].replace(/\s+/g, " ").trim() ?? "",
-    oneLiner: oneLiner?.[1].replace(/\s+/g, " ").trim() ?? "",
+    oneLiner: oneLiner?.[1]
+      .replace(/\n\s*\n---\s*$/, "")
+      .replace(/\s+/g, " ")
+      .trim() ?? "",
   };
 }
 
