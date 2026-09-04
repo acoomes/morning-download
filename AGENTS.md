@@ -9,4 +9,5 @@ This is a content repository for dated Morning Download briefings. Follow the fo
 - Verify that correction commits address every earlier Codex P0/P1 concern and do not create a new factual inconsistency.
 - Treat an already-completed event described as upcoming, pending, or planned as a P1 finding. Check the subject against earlier briefings in `briefs/`: if a prior briefing reports the event as done, the new claim is wrong regardless of what the cited source says.
 - Treat a specific figure with no supporting entry in that briefing's `## Sources` list as a P1 finding, even when the surrounding item is otherwise accurate.
+- Treat a market figure dated to a day the exchange was closed — a weekend or holiday session high, low, close or volume — as a P1 finding, and likewise any weekday label that does not match its date.
 - Do not raise style-only preferences as P0/P1 findings.
