@@ -34,7 +34,11 @@ jobs:
             // commit needs an explicit review request; this mention invokes the
             // native GitHub integration and consumes ChatGPT plan usage, not API
             // credits.
-            if (["synchronize", "reopened"].includes(context.payload.action)) {
+            if (
+              ["synchronize", "reopened", "ready_for_review"].includes(
+                context.payload.action,
+              )
+            ) {
               const marker = `<!-- codex-plan-review:${reviewedHead} -->`;
               const comments = await github.paginate(
                 github.rest.issues.listComments,
@@ -54,6 +58,7 @@ jobs:
                     "@codex review",
                     "",
                     `Please review the exact current head \`${reviewedHead}\` using the repository's AGENTS.md rules.`,
+                    "Report only P0/P1 findings; do not block on P2/P3 or style-only suggestions.",
                     "",
                     marker,
                   ].join("\n"),
@@ -87,8 +92,27 @@ jobs:
                   review.commit_id === reviewedHead,
               );
               if (codexReview) {
-                core.setFailed(
-                  `Codex found one or more P0/P1 concerns on ${reviewedHead.slice(0, 10)}.`,
+                const inlineComments = await github.paginate(
+                  github.rest.pulls.listReviewComments,
+                  { owner, repo, pull_number, per_page: 100 },
+                );
+                const reviewText = [
+                  codexReview.body || "",
+                  ...inlineComments
+                    .filter(
+                      (comment) =>
+                        comment.pull_request_review_id === codexReview.id,
+                    )
+                    .map((comment) => comment.body || ""),
+                ].join("\n");
+                if (/P[01]\s+Badge|\[P[01]\]/i.test(reviewText)) {
+                  core.setFailed(
+                    `Codex found one or more P0/P1 concerns on ${reviewedHead.slice(0, 10)}.`,
+                  );
+                  return;
+                }
+                core.info(
+                  `Codex reported no blocking P0/P1 concerns on ${reviewedHead.slice(0, 10)}.`,
                 );
                 return;
               }
