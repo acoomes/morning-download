@@ -98,7 +98,10 @@ jobs:
               owner,
               repo,
               workflow_id: "codex-correction-gate.yml",
-              ref: pr.head.ref,
+              // Always run the trusted implementation from the protected base.
+              // The dispatched job creates the required check on the supplied
+              // exact head SHA, so older PR branches need not contain this file.
+              ref: pr.base.ref,
               inputs: {
                 pull_number: String(pull_number),
                 head_sha: pr.head.sha,
@@ -116,6 +119,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
+      checks: write
       issues: read
       pull-requests: read
     env:
@@ -130,6 +134,46 @@ jobs:
             const pull_number = Number(process.env.PR_NUMBER);
             const reviewedHead = process.env.REVIEWED_HEAD;
             const codexLogin = "chatgpt-codex-connector[bot]";
+            const isDispatch = context.eventName === "workflow_dispatch";
+            let exactHeadCheckId;
+
+            if (isDispatch) {
+              const { data: exactHeadCheck } = await github.rest.checks.create({
+                owner,
+                repo,
+                name: "review",
+                head_sha: reviewedHead,
+                status: "in_progress",
+                started_at: new Date().toISOString(),
+                details_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+                output: {
+                  title: "Waiting for plan-backed Codex review",
+                  summary: `Waiting for a native Codex result on ${reviewedHead}.`,
+                },
+              });
+              exactHeadCheckId = exactHeadCheck.id;
+            }
+
+            const finish = async (conclusion, message) => {
+              if (exactHeadCheckId) {
+                await github.rest.checks.update({
+                  owner,
+                  repo,
+                  check_run_id: exactHeadCheckId,
+                  status: "completed",
+                  conclusion,
+                  completed_at: new Date().toISOString(),
+                  output: {
+                    title: conclusion === "success"
+                      ? "Plan-backed Codex review passed"
+                      : "Plan-backed Codex review blocked",
+                    summary: message,
+                  },
+                });
+              }
+              if (conclusion !== "success") core.setFailed(message);
+              else core.info(message);
+            };
 
             // Codex automatically reviews a newly opened or ready PR. After a
             // correction push, a contributor whose GitHub identity is linked to
@@ -148,7 +192,7 @@ jobs:
                 current.draft ||
                 current.head.sha !== reviewedHead
               ) {
-                core.setFailed("The pull request changed while Codex was reviewing it.");
+                await finish("failure", "The pull request changed while Codex was reviewing it.");
                 return;
               }
 
@@ -176,12 +220,14 @@ jobs:
                     .map((comment) => comment.body || ""),
                 ].join("\n");
                 if (/P[01]\s+Badge|\[P[01]\]/i.test(reviewText)) {
-                  core.setFailed(
+                  await finish(
+                    "failure",
                     `Codex found one or more P0/P1 concerns on ${reviewedHead.slice(0, 10)}.`,
                   );
                   return;
                 }
-                core.info(
+                await finish(
+                  "success",
                   `Codex reported no blocking P0/P1 concerns on ${reviewedHead.slice(0, 10)}.`,
                 );
                 return;
@@ -199,7 +245,8 @@ jobs:
                   /didn't find any major issues/i.test(comment.body || ""),
               );
               if (clean) {
-                core.info(
+                await finish(
+                  "success",
                   `Codex found no P0/P1 concerns on ${reviewedHead.slice(0, 10)}.`,
                 );
                 return;
@@ -210,7 +257,8 @@ jobs:
               }
             }
 
-            core.setFailed(
+            await finish(
+              "failure",
               "Codex did not finish its plan-backed review within 30 minutes. The pull request remains open.",
             );
 
