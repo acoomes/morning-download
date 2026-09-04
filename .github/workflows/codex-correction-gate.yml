@@ -28,7 +28,6 @@ jobs:
             const pull_number = context.payload.pull_request.number;
             const reviewedHead = context.payload.pull_request.head.sha;
             const codexLogin = "chatgpt-codex-connector[bot]";
-            let requestCommentId = null;
 
             // Codex automatically reviews a newly opened or ready PR. A new
             // commit needs an explicit review request; this mention invokes the
@@ -47,10 +46,8 @@ jobs:
               const existing = comments.find((comment) =>
                 (comment.body || "").includes(marker),
               );
-              if (existing) {
-                requestCommentId = existing.id;
-              } else {
-                const { data: comment } = await github.rest.issues.createComment({
+              if (!existing) {
+                await github.rest.issues.createComment({
                   owner,
                   repo,
                   issue_number: pull_number,
@@ -63,7 +60,6 @@ jobs:
                     marker,
                   ].join("\n"),
                 });
-                requestCommentId = comment.id;
               }
             }
 
@@ -117,19 +113,16 @@ jobs:
                 return;
               }
 
-              const reactions = requestCommentId
-                ? await github.paginate(
-                    github.rest.reactions.listForIssueComment,
-                    { owner, repo, comment_id: requestCommentId, per_page: 100 },
-                  )
-                : await github.paginate(
-                    github.rest.reactions.listForIssue,
-                    { owner, repo, issue_number: pull_number, per_page: 100 },
-                  );
-              const clean = reactions.some(
-                (reaction) =>
-                  reaction.user?.login === codexLogin &&
-                  reaction.content === "+1",
+              const issueComments = await github.paginate(
+                github.rest.issues.listComments,
+                { owner, repo, issue_number: pull_number, per_page: 100 },
+              );
+              const reviewedCommit = `**Reviewed commit:** \`${reviewedHead.slice(0, 10)}\``;
+              const clean = issueComments.some(
+                (comment) =>
+                  comment.user?.login === codexLogin &&
+                  (comment.body || "").includes(reviewedCommit) &&
+                  /didn't find any major issues/i.test(comment.body || ""),
               );
               if (clean) {
                 core.info(
