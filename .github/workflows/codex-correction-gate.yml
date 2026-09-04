@@ -1,6 +1,10 @@
 name: Codex plan review and auto-merge
 
 on:
+  # `synchronize` also bootstraps this workflow's own rollout: every correction
+  # push starts the exact-head polling gate even before the new comment/review
+  # subscriptions have reached the default branch. Once merged, those native
+  # events can resume a gate whose polling window has already ended.
   pull_request:
     types: [opened, reopened, ready_for_review, synchronize]
   issue_comment:
