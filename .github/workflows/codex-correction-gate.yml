@@ -34,7 +34,7 @@ jobs:
             // native GitHub integration and consumes ChatGPT plan usage, not API
             // credits.
             if (
-              ["synchronize", "reopened", "ready_for_review"].includes(
+              ["synchronize", "ready_for_review"].includes(
                 context.payload.action,
               )
             ) {
