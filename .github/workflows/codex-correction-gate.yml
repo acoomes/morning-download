@@ -26,11 +26,10 @@ on:
 
 concurrency:
   group: >-
-    codex-plan-review-${{
-      github.event.pull_request.number ||
-      github.event.issue.number ||
-      inputs.pull_number ||
-      github.run_id
+    ${{
+      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
+      format('codex-plan-review-{0}', github.event.pull_request.number || inputs.pull_number) ||
+      format('codex-plan-retrigger-{0}', github.run_id)
     }}
   cancel-in-progress: true
 
