@@ -104,8 +104,11 @@ jobs:
               repo,
               workflow_id: "codex-correction-gate.yml",
               // Always run the trusted implementation from the protected base.
-              // The dispatched job creates the required check on the supplied
-              // exact head SHA, so older PR branches need not contain this file.
+              // GitHub attaches that workflow's job checks to the base SHA, not
+              // the pull-request head. The dispatched job separately creates
+              // the protected `review` check on the supplied exact head SHA,
+              // so its own cancellation cannot poison the protected context
+              // and older PR branches need not contain this file.
               ref: pr.base.ref,
               inputs: {
                 pull_number: String(pull_number),
@@ -115,6 +118,12 @@ jobs:
             core.info(`Resumed the gate for pull request #${pull_number} at ${pr.head.sha}.`);
 
   review:
+    # Keep this job's check-run name distinct from the protected `review`
+    # check created below. A native Codex result retriggers this workflow and
+    # cancels the original polling run; if both checks share a name, GitHub
+    # records the protected context as cancelled and refuses an otherwise
+    # clean merge.
+    name: Codex review controller
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
