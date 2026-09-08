@@ -104,8 +104,11 @@ jobs:
               repo,
               workflow_id: "codex-correction-gate.yml",
               // Always run the trusted implementation from the protected base.
-              // The dispatched job creates the required check on the supplied
-              // exact head SHA, so older PR branches need not contain this file.
+              // GitHub attaches that workflow's job checks to the base SHA, not
+              // the pull-request head. The dispatched job separately creates
+              // the protected `review` check on the supplied exact head SHA,
+              // so its own cancellation cannot poison the protected context
+              // and older PR branches need not contain this file.
               ref: pr.base.ref,
               inputs: {
                 pull_number: String(pull_number),
