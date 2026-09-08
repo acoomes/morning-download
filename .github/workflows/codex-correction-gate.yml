@@ -115,6 +115,12 @@ jobs:
             core.info(`Resumed the gate for pull request #${pull_number} at ${pr.head.sha}.`);
 
   review:
+    # Keep this job's check-run name distinct from the protected `review`
+    # check created below. A native Codex result retriggers this workflow and
+    # cancels the original polling run; if both checks share a name, GitHub
+    # records the protected context as cancelled and refuses an otherwise
+    # clean merge.
+    name: Codex review controller
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
