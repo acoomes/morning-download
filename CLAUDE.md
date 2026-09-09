@@ -36,3 +36,10 @@ Each headline's body is analysis-forward: state the fact, then explain the secon
 - **Every named figure needs a source in the same briefing.** Valuations, prices, percentages, dates and vote counts must each be traceable to an entry in that day's `## Sources` list. If no source substantiates a number, cut the number — do not carry it because it appeared in a prior draft or a roundup page.
 - Prefer a dated, article-level URL over a homepage, index, or rolling "this week" feed. Rotating pages stop substantiating the claim as soon as they update.
 - **Sanity-check dates against the calendar.** A market open, close, session high/low or trading-volume figure must fall on a weekday the exchange was open; a weekday label attached to a date must match that date. Aggregators and search summaries routinely round a Monday session back to the weekend. Check the date before you print it — a precise but impossible date reads as authoritative and is harder to catch than a vague one.
+
+## Required PR review handoff
+
+- Codex automatically reviews the initial PR head, but a correction push does not automatically start a follow-up review. Immediately after pushing any correction commit, comment exactly `@codex review` on that PR using the authenticated repository-owner GitHub session. Do this before waiting on checks.
+- Confirm that Codex reviews the current head commit, not an earlier revision. The `**Reviewed commit:**` SHA in the Codex result must match the leading characters of `gh pr view <number> --json headRefOid --jq .headRefOid`.
+- Keep monitoring the PR after requesting the follow-up. A clean exact-head review clears the protected `review` check and the workflow merges automatically; a new P0/P1 finding requires another fix, push, and `@codex review` cycle.
+- Never bypass the protected review check or merge manually because a follow-up is missing or slow. If Codex does not react to the exact trigger, report the connector failure rather than treating the content as validated.

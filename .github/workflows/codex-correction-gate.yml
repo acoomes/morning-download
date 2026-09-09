@@ -273,7 +273,7 @@ jobs:
 
             await finish(
               "failure",
-              "Codex did not finish its plan-backed review within 30 minutes. The pull request remains open.",
+              "No exact-head Codex result arrived within 30 minutes. After every correction push, a ChatGPT-linked contributor must comment `@codex review`; the pull request remains open.",
             );
 
   finalize:
