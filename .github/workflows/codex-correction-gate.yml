@@ -190,7 +190,11 @@ jobs:
               exactHeadCheckId = exactHeadCheck.id;
             }
 
-            const finish = async (conclusion, message) => {
+            const finish = async (
+              conclusion,
+              message,
+              shouldFinalize = conclusion === "success",
+            ) => {
               if (exactHeadCheckId) {
                 await github.rest.checks.update({
                   owner,
@@ -202,14 +206,16 @@ jobs:
                   output: {
                     title: conclusion === "success"
                       ? "Plan-backed Codex review passed"
-                      : "Plan-backed Codex review blocked",
+                      : conclusion === "failure"
+                        ? "Plan-backed Codex review blocked"
+                        : "Plan-backed Codex review no longer needed",
                     summary: message,
                   },
                 });
               }
-              if (conclusion !== "success") core.setFailed(message);
+              if (conclusion === "failure") core.setFailed(message);
               else {
-                core.setOutput("should_finalize", "true");
+                if (shouldFinalize) core.setOutput("should_finalize", "true");
                 core.info(message);
               }
             };
@@ -227,10 +233,26 @@ jobs:
                 pull_number,
               });
               if (
-                current.state !== "open" ||
-                current.draft ||
-                current.head.sha !== reviewedHead
+                current.state !== "open" &&
+                current.merged &&
+                current.head.sha === reviewedHead
               ) {
+                await finish(
+                  "success",
+                  `Pull request #${pull_number} already merged this clean exact head.`,
+                  false,
+                );
+                return;
+              }
+              if (current.state !== "open") {
+                await finish(
+                  "neutral",
+                  `Pull request #${pull_number} closed without merging; no action remains.`,
+                  false,
+                );
+                return;
+              }
+              if (current.draft || current.head.sha !== reviewedHead) {
                 await finish("failure", "The pull request changed while Codex was reviewing it.");
                 return;
               }
@@ -334,6 +356,14 @@ jobs:
             });
             const trusted = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
             if (
+              pr.state !== "open" &&
+              pr.merged &&
+              pr.head.sha === reviewedHead
+            ) {
+              core.info(`Pull request #${pull_number} was already merged by a concurrent clean run.`);
+              return;
+            }
+            if (
               pr.state !== "open" ||
               pr.draft ||
               pr.head.sha !== reviewedHead ||
@@ -432,6 +462,14 @@ jobs:
               repo,
               pull_number,
             });
+            if (
+              current.state !== "open" &&
+              current.merged &&
+              current.head.sha === reviewedHead
+            ) {
+              core.info(`Pull request #${pull_number} was already merged by a concurrent clean run.`);
+              return;
+            }
             if (current.state !== "open" || current.head.sha !== reviewedHead) {
               core.setFailed("The pull request changed before merge.");
               return;
