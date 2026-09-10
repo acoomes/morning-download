@@ -246,8 +246,8 @@ jobs:
               }
               if (current.state !== "open") {
                 await finish(
-                  "neutral",
-                  `Pull request #${pull_number} closed without merging; no action remains.`,
+                  "failure",
+                  `Pull request #${pull_number} closed without merging; review remains unsatisfied.`,
                   false,
                 );
                 return;
