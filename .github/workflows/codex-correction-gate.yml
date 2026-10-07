@@ -488,11 +488,100 @@ jobs:
               return;
             }
 
-            await github.rest.actions.createWorkflowDispatch({
+            core.info(`Squash-merged pull request #${pull_number} at ${reviewedHead}.`);
+
+      # Publishing runs as its own `always()` step so that cancelling this job
+      # cannot strand a merge. With cancel-in-progress, a newer run in the same
+      # concurrency group can cancel this job in the instant between the merge
+      # above and a dispatch placed after it: the pull request merges, the feed
+      # never publishes, and the run ends "cancelled", not red. That is what
+      # happened to #222 on 2026-09-20 (merged 14:09:11, job cancelled 14:09:12).
+      # Re-reading the merge state here also covers the two "already merged by a
+      # concurrent clean run" exits above, which return before publishing.
+      # publish-site-feed is idempotent, so a redundant dispatch is harmless.
+      - name: Publish the site feed for the merged pull request
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pull_number = Number(process.env.PR_NUMBER);
+            const reviewedHead = process.env.REVIEWED_HEAD;
+
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+            if (!pr.merged || pr.head.sha !== reviewedHead) {
+              core.info(`Pull request #${pull_number} is not merged at ${reviewedHead.slice(0, 10)}; nothing to publish.`);
+              return;
+            }
+
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: "publish-site-feed.yml",
+                ref: "main",
+              });
+            } catch (error) {
+              core.setFailed(
+                `Pull request #${pull_number} merged, but dispatching publish-site-feed failed: ${error.message}. ` +
+                  "The website will lag until the feed publishes; the scheduled backstop retries hourly.",
+              );
+              return;
+            }
+            core.info(`Dispatched publish-site-feed for merged pull request #${pull_number}.`);
+
+      # Merged head branches were never removed, so they accumulated (98 of them
+      # by 2026-10-07). Delete this pull request's head branch only when it is
+      # provably finished: merged at the reviewed head, still pointing at exactly
+      # that commit, in this repository, not the base or default branch, and not
+      # in use by another open pull request. Failure here never fails the job.
+      - name: Delete the merged head branch
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pull_number = Number(process.env.PR_NUMBER);
+            const reviewedHead = process.env.REVIEWED_HEAD;
+
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+            const ref = pr.head.ref;
+            const keep = (why) => core.info(`Keeping branch ${ref}: ${why}.`);
+
+            if (!pr.merged || pr.head.sha !== reviewedHead) {
+              return keep("the pull request is not merged at the reviewed head");
+            }
+            if (pr.head.repo?.full_name !== `${owner}/${repo}`) {
+              return keep("it belongs to another repository");
+            }
+            const { data: repository } = await github.rest.repos.get({ owner, repo });
+            if (ref === pr.base.ref || ref === repository.default_branch) {
+              return keep("it is the base or default branch");
+            }
+
+            let current;
+            try {
+              ({ data: current } = await github.rest.git.getRef({ owner, repo, ref: `heads/${ref}` }));
+            } catch (error) {
+              return keep(`it no longer exists (${error.status ?? error.message})`);
+            }
+            if (current.object.sha !== reviewedHead) {
+              return keep(`it moved to ${current.object.sha.slice(0, 10)} after the merge`);
+            }
+
+            const { data: openPulls } = await github.rest.pulls.list({
               owner,
               repo,
-              workflow_id: "publish-site-feed.yml",
-              ref: "main",
+              state: "open",
+              head: `${owner}:${ref}`,
             });
+            if (openPulls.length > 0) {
+              return keep(`open pull request #${openPulls[0].number} still uses it`);
+            }
 
-            core.info(`Squash-merged pull request #${pull_number} at ${reviewedHead}.`);
+            try {
+              await github.rest.git.deleteRef({ owner, repo, ref: `heads/${ref}` });
+              core.info(`Deleted merged head branch ${ref}.`);
+            } catch (error) {
+              core.warning(`Could not delete merged head branch ${ref}: ${error.message}`);
+            }
