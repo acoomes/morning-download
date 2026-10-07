@@ -532,10 +532,11 @@ jobs:
 
       # Merged head branches were never removed, so they accumulated (98 of them
       # by 2026-10-07). Delete this pull request's head branch only when it is
-      # provably finished: merged at the reviewed head, still pointing at exactly
-      # that commit, in this repository, not the base or default branch, and not
-      # in use by another open pull request. Failure here never fails the job.
-      - name: Delete the merged head branch
+      # provably finished: merged at the reviewed head, in this repository, not
+      # the base or default branch, and not in use by another open pull request.
+      # Failure here never fails the job: every API error becomes a warning.
+      - name: Check whether the merged head branch can be deleted
+        id: branch_cleanup
         if: always()
         uses: actions/github-script@v7
         with:
@@ -543,45 +544,58 @@ jobs:
             const { owner, repo } = context.repo;
             const pull_number = Number(process.env.PR_NUMBER);
             const reviewedHead = process.env.REVIEWED_HEAD;
-
-            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
-            const ref = pr.head.ref;
+            let ref = "(unknown)";
             const keep = (why) => core.info(`Keeping branch ${ref}: ${why}.`);
 
-            if (!pr.merged || pr.head.sha !== reviewedHead) {
-              return keep("the pull request is not merged at the reviewed head");
-            }
-            if (pr.head.repo?.full_name !== `${owner}/${repo}`) {
-              return keep("it belongs to another repository");
-            }
-            const { data: repository } = await github.rest.repos.get({ owner, repo });
-            if (ref === pr.base.ref || ref === repository.default_branch) {
-              return keep("it is the base or default branch");
-            }
-
-            let current;
             try {
-              ({ data: current } = await github.rest.git.getRef({ owner, repo, ref: `heads/${ref}` }));
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+              ref = pr.head.ref;
+
+              if (!pr.merged || pr.head.sha !== reviewedHead) {
+                return keep("the pull request is not merged at the reviewed head");
+              }
+              if (pr.head.repo?.full_name !== `${owner}/${repo}`) {
+                return keep("it belongs to another repository");
+              }
+              const { data: repository } = await github.rest.repos.get({ owner, repo });
+              if (ref === pr.base.ref || ref === repository.default_branch) {
+                return keep("it is the base or default branch");
+              }
+              const { data: openPulls } = await github.rest.pulls.list({
+                owner,
+                repo,
+                state: "open",
+                head: `${owner}:${ref}`,
+              });
+              if (openPulls.length > 0) {
+                return keep(`open pull request #${openPulls[0].number} still uses it`);
+              }
             } catch (error) {
-              return keep(`it no longer exists (${error.status ?? error.message})`);
-            }
-            if (current.object.sha !== reviewedHead) {
-              return keep(`it moved to ${current.object.sha.slice(0, 10)} after the merge`);
+              core.warning(`Skipping cleanup of merged head branch ${ref}: ${error.message}`);
+              return;
             }
 
-            const { data: openPulls } = await github.rest.pulls.list({
-              owner,
-              repo,
-              state: "open",
-              head: `${owner}:${ref}`,
-            });
-            if (openPulls.length > 0) {
-              return keep(`open pull request #${openPulls[0].number} still uses it`);
-            }
+            core.setOutput("ref", ref);
 
-            try {
-              await github.rest.git.deleteRef({ owner, repo, ref: `heads/${ref}` });
-              core.info(`Deleted merged head branch ${ref}.`);
-            } catch (error) {
-              core.warning(`Could not delete merged head branch ${ref}: ${error.message}`);
-            }
+      # The REST and GraphQL delete-ref endpoints take no expected SHA, so a push
+      # landing between a read and the delete would be discarded. A git push
+      # delete with an explicit lease sends the reviewed head as the ref's old
+      # value, and the server applies it as a compare-and-swap: if the branch has
+      # moved, the push is rejected and the new work survives.
+      - name: Delete the merged head branch only if it still points at the reviewed head
+        if: always() && steps.branch_cleanup.outputs.ref != ''
+        env:
+          BRANCH: ${{ steps.branch_cleanup.outputs.ref }}
+          TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          remote="https://x-access-token:${TOKEN}@github.com/${REPOSITORY}.git"
+          scratch="$(mktemp -d)"
+          git -C "$scratch" init --quiet
+          if git -C "$scratch" push \
+            "--force-with-lease=refs/heads/${BRANCH}:${REVIEWED_HEAD}" \
+            "$remote" ":refs/heads/${BRANCH}"; then
+            echo "Deleted merged head branch ${BRANCH} at ${REVIEWED_HEAD:0:10}."
+          else
+            echo "::warning title=Branch kept::Did not delete ${BRANCH}: it moved past ${REVIEWED_HEAD:0:10}, is already gone, or the push was refused."
+          fi
