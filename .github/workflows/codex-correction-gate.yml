@@ -488,11 +488,114 @@ jobs:
               return;
             }
 
-            await github.rest.actions.createWorkflowDispatch({
-              owner,
-              repo,
-              workflow_id: "publish-site-feed.yml",
-              ref: "main",
-            });
-
             core.info(`Squash-merged pull request #${pull_number} at ${reviewedHead}.`);
+
+      # Publishing runs as its own `always()` step so that cancelling this job
+      # cannot strand a merge. With cancel-in-progress, a newer run in the same
+      # concurrency group can cancel this job in the instant between the merge
+      # above and a dispatch placed after it: the pull request merges, the feed
+      # never publishes, and the run ends "cancelled", not red. That is what
+      # happened to #222 on 2026-09-20 (merged 14:09:11, job cancelled 14:09:12).
+      # Re-reading the merge state here also covers the two "already merged by a
+      # concurrent clean run" exits above, which return before publishing.
+      # publish-site-feed is idempotent, so a redundant dispatch is harmless.
+      - name: Publish the site feed for the merged pull request
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pull_number = Number(process.env.PR_NUMBER);
+            const reviewedHead = process.env.REVIEWED_HEAD;
+
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+            if (!pr.merged || pr.head.sha !== reviewedHead) {
+              core.info(`Pull request #${pull_number} is not merged at ${reviewedHead.slice(0, 10)}; nothing to publish.`);
+              return;
+            }
+
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: "publish-site-feed.yml",
+                ref: "main",
+              });
+            } catch (error) {
+              core.setFailed(
+                `Pull request #${pull_number} merged, but dispatching publish-site-feed failed: ${error.message}. ` +
+                  "The website will lag until the feed publishes; the scheduled backstop retries hourly.",
+              );
+              return;
+            }
+            core.info(`Dispatched publish-site-feed for merged pull request #${pull_number}.`);
+
+      # Merged head branches were never removed, so they accumulated (98 of them
+      # by 2026-10-07). Delete this pull request's head branch only when it is
+      # provably finished: merged at the reviewed head, in this repository, not
+      # the base or default branch, and not in use by another open pull request.
+      # Failure here never fails the job: every API error becomes a warning.
+      - name: Check whether the merged head branch can be deleted
+        id: branch_cleanup
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pull_number = Number(process.env.PR_NUMBER);
+            const reviewedHead = process.env.REVIEWED_HEAD;
+            let ref = "(unknown)";
+            const keep = (why) => core.info(`Keeping branch ${ref}: ${why}.`);
+
+            try {
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+              ref = pr.head.ref;
+
+              if (!pr.merged || pr.head.sha !== reviewedHead) {
+                return keep("the pull request is not merged at the reviewed head");
+              }
+              if (pr.head.repo?.full_name !== `${owner}/${repo}`) {
+                return keep("it belongs to another repository");
+              }
+              const { data: repository } = await github.rest.repos.get({ owner, repo });
+              if (ref === pr.base.ref || ref === repository.default_branch) {
+                return keep("it is the base or default branch");
+              }
+              const { data: openPulls } = await github.rest.pulls.list({
+                owner,
+                repo,
+                state: "open",
+                head: `${owner}:${ref}`,
+              });
+              if (openPulls.length > 0) {
+                return keep(`open pull request #${openPulls[0].number} still uses it`);
+              }
+            } catch (error) {
+              core.warning(`Skipping cleanup of merged head branch ${ref}: ${error.message}`);
+              return;
+            }
+
+            core.setOutput("ref", ref);
+
+      # The REST and GraphQL delete-ref endpoints take no expected SHA, so a push
+      # landing between a read and the delete would be discarded. A git push
+      # delete with an explicit lease sends the reviewed head as the ref's old
+      # value, and the server applies it as a compare-and-swap: if the branch has
+      # moved, the push is rejected and the new work survives.
+      - name: Delete the merged head branch only if it still points at the reviewed head
+        if: always() && steps.branch_cleanup.outputs.ref != ''
+        env:
+          BRANCH: ${{ steps.branch_cleanup.outputs.ref }}
+          TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          remote="https://x-access-token:${TOKEN}@github.com/${REPOSITORY}.git"
+          scratch="$(mktemp -d)"
+          git -C "$scratch" init --quiet
+          if git -C "$scratch" push \
+            "--force-with-lease=refs/heads/${BRANCH}:${REVIEWED_HEAD}" \
+            "$remote" ":refs/heads/${BRANCH}"; then
+            echo "Deleted merged head branch ${BRANCH} at ${REVIEWED_HEAD:0:10}."
+          else
+            echo "::warning title=Branch kept::Did not delete ${BRANCH}: it moved past ${REVIEWED_HEAD:0:10}, is already gone, or the push was refused."
+          fi

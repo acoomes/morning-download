@@ -8,6 +8,12 @@ on:
       - ".github/scripts/generate-site-feed.mjs"
       - ".github/workflows/publish-site-feed.yml"
   workflow_dispatch:
+  # Backstop for a missed publish. Merges made with GITHUB_TOKEN never fire the
+  # push trigger above, so the feed normally publishes only via finalize's
+  # dispatch; if that dispatch is ever lost, this catches it within the hour.
+  # Runs that find nothing to change exit in seconds.
+  schedule:
+    - cron: "17 * * * *"
 
 permissions:
   checks: write
@@ -16,7 +22,11 @@ permissions:
 
 concurrency:
   group: publish-site-briefing-feed
-  cancel-in-progress: true
+  # Queue rather than cancel. With the hourly schedule a run can overlap a
+  # dispatched one, and cancelling a run after it has pushed its update branch
+  # strands that branch and any half-made pull request. Each run is idempotent,
+  # so a queued run simply finds the feed current and exits.
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -42,6 +52,21 @@ jobs:
             echo "The published feed is already current."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+
+          # A scheduled run that finds work to do means a merge never published.
+          # Only flag it once the change is old enough that the normal dispatch
+          # should already have landed, so the ordinary race with an in-flight
+          # dispatch does not raise a false alarm.
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            age=$(( $(date +%s) - $(git log -1 --format=%ct -- briefs/) ))
+            if [ "$age" -gt 900 ]; then
+              echo "::warning title=Missed feed publish::site/briefs.json was stale on a scheduled check, $((age / 60)) minutes after the last briefing change, so that merge never published. Repairing it now. Check the finalize job of the most recently merged pull request."
+              {
+                echo "### Missed feed publish repaired"
+                echo "The feed was $((age / 60)) minutes behind \`briefs/\` on a scheduled check, which means a merged pull request never published it. This run publishes it now."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
 
           branch="automation/site-feed-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
