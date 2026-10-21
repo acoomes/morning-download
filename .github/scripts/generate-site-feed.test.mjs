@@ -97,3 +97,32 @@ Sources: [Lab](https://example.com/b)
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("rejects citations separated from a story by a divider or heading", async () => {
+  const root = await mkdtemp(join(tmpdir(), "morning-download-boundaries-"));
+  try {
+    const month = join(root, "briefs", "2026-10");
+    await mkdir(month, { recursive: true });
+    for (const heading of ["## Section 1: World & Market Briefing", "## Special Report: Markets"]) {
+      for (const boundary of ["---", "### Context", "### **Context** — Background."]) {
+        await writeFile(join(month, "2026-10-21.md"), `${heading}
+
+📈 **Markets** — World analysis.
+
+${boundary}
+
+Sources: [News](https://example.com/a)
+
+## Closing
+
+## Sources
+
+- [News](https://example.com/a)
+`);
+        await assert.rejects(generateFeed({ root }), /Sources must immediately follow a story/);
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

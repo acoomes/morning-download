@@ -7,7 +7,7 @@ function blocksBetween(markdown, start, end) {
   return slice
     .split(/\n\s*\n/)
     .map((block) => block.trim().replace(/\n(?![-#])/g, " "))
-    .filter((block) => block && block !== "---" && !block.startsWith("##"));
+    .filter(Boolean);
 }
 
 function parseStory(block) {
@@ -23,6 +23,10 @@ export function parseStoryBlocks(blocks) {
   const stories = [];
   let previousStory = null;
   for (const block of blocks) {
+    if (block === "---" || /^#{1,6}(?:\s|$)/.test(block)) {
+      previousStory = null;
+      continue;
+    }
     if (block.startsWith("Sources:")) {
       if (!previousStory || previousStory.sources) {
         throw new Error("Sources must immediately follow a story, once per story.");
