@@ -54,6 +54,8 @@ Section 2: AI & Agentic Systems Briefing
 
 Each bullet: emoji + one-line summary + why it matters. Flag anything directly relevant to building agentic platforms or enterprise AI delivery.
 
+For every story in both sections, including Wildcards, add a separate plain Markdown paragraph immediately below it: `Sources: [Publisher](https://example.com/article) · [Other publisher](https://example.org/article)`. Leave a blank line before and after. Use short publisher labels, cite only articles that support that story, and retain every cited URL in the full `## Sources` list with its article title and publisher. Do not guess associations from the order of the source list.
+
 ---
 
 Closing:
@@ -84,7 +86,7 @@ Also follow the authoring conventions in CLAUDE.md in the repository.
 
 DELIVERY:
 
-Create a new page titled "Morning Download — [today's date, e.g. March 31, 2026]" as a child page under the Notion page with ID 334a18e3-0b0d-81a1-a86a-cd04bc99725d. Use the 📰 icon. Format the briefing using clean Markdown with headers for each section. Include the list of sources at the bottom.
+Create a new page titled "Morning Download — [today's date, e.g. March 31, 2026]" as a child page under the Notion page with ID 334a18e3-0b0d-81a1-a86a-cd04bc99725d. Use the 📰 icon. Format the briefing using clean Markdown with headers for each section. Include per-story source paragraphs and the full list of sources at the bottom.
 
 Finally, commit the briefing to the repository as a new markdown file in a new branch, push the changes, then open a PR.
 
