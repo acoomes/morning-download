@@ -10,7 +10,7 @@ on:
   pull_request:
     types: [opened, reopened, ready_for_review, synchronize]
   issue_comment:
-    types: [created]
+    types: [created, edited]
   pull_request_review:
     types: [submitted]
   workflow_dispatch:
@@ -65,6 +65,16 @@ jobs:
             });
             const codexLogin = "chatgpt-codex-connector[bot]";
             const trusted = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+            // Only trust machine-readable summaries authored by the native Codex bot.
+            const summaryForHead = (comment, head) => {
+              if (comment.user?.login !== "chatgpt-codex-connector[bot]") return null;
+              const match = (comment.body || "").match(/<!-- codex-review-state:v1 ([\s\S]*?) -->/);
+              if (!match) return null;
+              try {
+                const state = JSON.parse(match[1]).code_review;
+                return state?.commit_sha === head ? state : null;
+              } catch { return null; }
+            };
             let shouldResume = false;
 
             if (isComment) {
@@ -74,9 +84,9 @@ jobs:
                 /(^|\n)\s*@codex\s+review\b/i.test(comment.body || "");
               const exactHeadResult =
                 comment.user?.login === codexLogin &&
-                (comment.body || "").includes(
+                ((comment.body || "").includes(
                   `**Reviewed commit:** \`${pr.head.sha.slice(0, 10)}\``,
-                );
+                ) || summaryForHead(comment, pr.head.sha)?.status === "completed");
               shouldResume = requestedByContributor || exactHeadResult;
             } else {
               const review = context.payload.review;
@@ -151,6 +161,16 @@ jobs:
             const pull_number = Number(process.env.PR_NUMBER);
             const reviewedHead = process.env.REVIEWED_HEAD;
             const codexLogin = "chatgpt-codex-connector[bot]";
+            // Only trust machine-readable summaries authored by the native Codex bot.
+            const summaryForHead = (comment, head) => {
+              if (comment.user?.login !== "chatgpt-codex-connector[bot]") return null;
+              const match = (comment.body || "").match(/<!-- codex-review-state:v1 ([\s\S]*?) -->/);
+              if (!match) return null;
+              try {
+                const state = JSON.parse(match[1]).code_review;
+                return state?.commit_sha === head ? state : null;
+              } catch { return null; }
+            };
             const isDispatch = context.eventName === "workflow_dispatch";
             let exactHeadCheckId;
             core.setOutput("should_finalize", "false");
@@ -298,6 +318,25 @@ jobs:
                 github.rest.issues.listComments,
                 { owner, repo, issue_number: pull_number, per_page: 100 },
               );
+              // The summary is edited in place as review progresses. Prefer it
+              // over legacy prose so incomplete or unresolved results fail closed.
+              const summary = issueComments
+                .map((comment) => summaryForHead(comment, reviewedHead))
+                .find(Boolean);
+              if (summary) {
+                if (summary.status === "completed" &&
+                    summary.has_unresolved_findings === false &&
+                    typeof summary.has_any_findings === "boolean") {
+                  await finish("success", `Codex completed review with no unresolved findings on ${reviewedHead.slice(0, 10)}.`);
+                  return;
+                }
+                if (summary.status === "completed" && summary.has_unresolved_findings === true) {
+                  await finish("failure", "Codex review has unresolved findings.");
+                  return;
+                }
+                if (attempt < 119) await new Promise((resolve) => setTimeout(resolve, 15000));
+                continue;
+              }
               const reviewedCommit = `**Reviewed commit:** \`${reviewedHead.slice(0, 10)}\``;
               const clean = issueComments.some(
                 (comment) =>
