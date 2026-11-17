@@ -210,13 +210,33 @@ jobs:
               exactHeadCheckId = exactHeadCheck.id;
             }
 
+            // A newly created check can briefly return 404 on update (as on
+            // PR #314). Retry transient API errors, but keep the gate blocked
+            // if the check cannot be completed successfully.
+            const updateExactHeadCheck = async (parameters) => {
+              const delays = [1000, 2000, 4000, 8000];
+              for (let attempt = 0; ; attempt += 1) {
+                try {
+                  return await github.rest.checks.update(parameters);
+                } catch (error) {
+                  const transient = error.status === 404 || error.status === 429 ||
+                    (error.status >= 500 && error.status <= 599);
+                  if (!transient || attempt >= delays.length) throw error;
+                  core.warning(
+                    `Check update returned HTTP ${error.status}; retrying in ${delays[attempt]}ms.`,
+                  );
+                  await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+                }
+              }
+            };
+
             const finish = async (
               conclusion,
               message,
               shouldFinalize = conclusion === "success",
             ) => {
               if (exactHeadCheckId) {
-                await github.rest.checks.update({
+                await updateExactHeadCheck({
                   owner,
                   repo,
                   check_run_id: exactHeadCheckId,
